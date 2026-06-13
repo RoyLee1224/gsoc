@@ -1,0 +1,6 @@
+# Clone projects (each has its own git)
+airflow/
+airflow-steward/
+
+# OS files
+.DS_Store
