@@ -1,241 +1,205 @@
-# Eval Framework Decision — Discussion Draft
+<!--
+ Licensed to the Apache Software Foundation (ASF) under one
+ or more contributor license agreements.  See the NOTICE file
+ distributed with this work for additional information
+ regarding copyright ownership.  The ASF licenses this file
+ to you under the Apache License, Version 2.0 (the
+ "License"); you may not use this file except in compliance
+ with the License.  You may obtain a copy of the License at
 
-## Background
+   http://www.apache.org/licenses/LICENSE-2.0
 
-Sync recap (2026-06-10) agreed:
-- Reuse steward's fixture format (step-config.json / report.md / expected.json)
-- Runner maintained separately in the Airflow repo
-- v1 scope: single-turn, single-model, with-skill vs without-skill
+ Unless required by applicable law or agreed to in writing,
+ software distributed under the License is distributed on an
+ "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ KIND, either express or implied.  See the License for the
+ specific language governing permissions and limitations
+ under the License.
+-->
 
-Jarek has since clarified that steward fixture compatibility is not
-a hard requirement. This simplifies the framework choice.
+# Eval Framework for Agent Guidance
 
-I ran a spike testing promptfoo on 3 cases with a 7-arm matrix.
-Two findings emerged: one about AGENTS.md, one about case quality.
+## Problem
 
-## The real finding: fixing line 26 alone is not enough
+When a contributor modifies `AGENTS.md` or a skill file (`SKILL.md`),
+there is no systematic way to verify the change improves agent
+behavior or avoids regressions. The contributor must manually test
+with Claude, eyeball responses, and hope nothing broke.
 
-7 arms, 3 cases. Full matrix:
+## Proposal
+
+Use [promptfoo](https://github.com/promptfoo/promptfoo) with the
+Claude Agent SDK provider as a dev-time eval tool. The harness
+compares agent behavior **before** and **after** a guidance change,
+using the same set of probe cases.
+
+### What it does
+
+```bash
+# After modifying AGENTS.md or SKILL.md:
+./dev/skill-evals/eval.sh
+
+# Output:
+# Changes detected (vs main):
+#   AGENTS.md — modified
+#   SKILL.md  — unchanged
+#
+#          | before | after
+# case-1   | PASS   | FAIL   ← regression
+# case-2   | PASS   | PASS   ← no impact
+# case-3   | FAIL   | PASS   ← improvement
+```
+
+### How it works
+
+1. `eval.sh` extracts the `main` branch versions of `AGENTS.md` and
+   `SKILL.md` via `git show`, and copies the working tree versions.
+2. It builds temporary working directories — one per arm — with the
+   appropriate files placed where the Agent SDK discovers them.
+3. promptfoo runs each case against both arms in parallel and
+   produces a side-by-side comparison.
+4. Temporary directories are cleaned up on exit.
+
+### Architecture
+
+```
+dev/skill-evals/
+  eval.sh                       # entry point
+  promptfooconfig.yaml           # quick mode: 2 arms (before vs after)
+  promptfooconfig.full.yaml      # full mode: 5 arms (+ isolation arms)
+  cases/
+    command-routing.yaml         # cases grouped by concern
+```
+
+**Quick mode (default):** 2 arms — before (main) vs after (working tree).
+Answers "did my change cause a regression?"
+
+**Full mode (`--full`):** 5 arms — adds baseline (no guidance),
+skill-only (skill without AGENTS.md), and agents-only (AGENTS.md
+without skill). For periodic analysis of how guidance components
+interact.
+
+### Adding cases
+
+Add entries to an existing file in `cases/` or create a new file.
+Cases are YAML — no directory structure, no configuration changes:
+
+```yaml
+# cases/command-routing.yaml
+- description: "Provider test: uv fails, fallback to breeze"
+  vars:
+    request: |
+      Run amazon provider tests.
+      uv failed with: error: libpq-dev not found
+  assert:
+    - type: javascript
+      value: 'output.runner === "breeze"'
+```
+
+All arms run every case automatically.
+
+### Prerequisites
+
+- `ANTHROPIC_API_KEY` environment variable
+- `npx` (Node.js, already present for UI development)
+
+## Triggering eval on guidance changes
+
+Eval requires LLM API calls — too expensive and slow for a
+pre-commit hook. Instead, the harness integrates at two levels:
+
+### Prek hook: reminder (no API cost)
+
+A prek hook detects when `AGENTS.md` or `SKILL.md` is modified
+and prints a reminder. No API calls, no latency — just a message:
+
+```
+⚠  AGENTS.md modified — run ./dev/skill-evals/eval.sh before pushing
+```
+
+This fits the existing prek pattern. The repo already has a
+`generate-agent-skills` hook that triggers on `AGENTS.md` changes
+(`.pre-commit-config.yaml` line 936). The reminder hook uses the
+same file pattern.
+
+### PR review: eval results in description
+
+Contributors who modify guidance files include eval results in the
+PR description — before/after pass rates, which cases regressed,
+which improved. Reviewers can see the impact at a glance.
+
+```markdown
+## Eval results
+
+| Case | before | after |
+|------|--------|-------|
+| Core unit test (uv) | PASS | PASS |
+| Helm test (breeze) | PASS | PASS |
+| mypy (prek) | FAIL | PASS |
+
+Pass rate: 2/3 → 3/3
+```
+
+This keeps eval voluntary (contributors run it, not CI), while
+making the results visible during review.
+
+## Spike results
+
+3 cases, 7 arms (initial spike with manual arm configuration):
 
 | Arm | Case 1 (contradiction) | Case 2 (Helm) | Case 3 (mypy) |
 |-----|:---:|:---:|:---:|
 | baseline | FAIL | PASS | FAIL |
 | skill-only | PASS | PASS | PASS |
 | agents-current | FAIL | PASS | PASS |
-| **agents-proposed** | **FAIL** | PASS | PASS |
+| agents-proposed | FAIL | PASS | PASS |
 | skill+agents-current | PASS | PASS | PASS |
 | skill+agents-proposed | PASS | PASS | PASS |
 | real-env | PASS | PASS | PASS |
 
-`agents-proposed` fixes line 26 ("never run pytest on host" →
-"use uv for targeted tests, fall back to breeze"). **It still
-fails case-1.** The model chose breeze anyway.
+Key findings:
 
-Hypothesis: the 470-line AGENTS.md contains enough breeze-related
-commands and context that the model develops a breeze-preference
-bias, regardless of one line change. This needs investigation
-with more cases — which is exactly what the eval harness is for.
+1. **Skill is effective.** Baseline 1/3 → skill-only 3/3.
+2. **Fixing line 26 alone is not enough.** `agents-proposed` still
+   fails case-1. The 470-line AGENTS.md likely creates a
+   breeze-preference bias beyond one line.
+3. **Skill overrides the contradiction.** When skill and AGENTS.md
+   coexist, the skill's routing rules take priority.
+4. **Real-env confirms skill is loaded.** Matches skill+agents
+   results.
 
-Other findings:
-1. Skill is effective: baseline 1/3 → skill-only 3/3
-2. Skill overrides the AGENTS.md contradiction when both are present
-3. Real-env confirms skill is loaded (matches skill+agents results)
+The cases are not yet discriminating enough — 5 of 7 arms scored
+3/3. Expanding to 10+ cases is the immediate priority.
 
-## The bottleneck is cases, not the runner
+## Context degradation
 
-Of 21 eval runs, 5 arms scored 3/3 — the cases are too easy for
-most configurations. The current 3 cases are not discriminating
-enough to surface subtle regressions.
-
-The framework should be evaluated on **how efficiently it lets me
-expand cases**. Each new case in promptfoo automatically runs
-across all arms — one YAML block produces 6 data points.
-
-## What promptfoo gives a developer
-
-A developer modifies SKILL.md or AGENTS.md and asks: "did this
-make things better or worse?" Without tooling, they open Claude,
-paste a prompt, eyeball the response, open another session without
-the change, eyeball again — three repeats and it's chaos.
-
-promptfoo turns that into one command.
-
-### Layer 1: One command to answer "did my change help?"
-
-- **Side-by-side comparison** — before vs after, with-skill vs
-  without-skill, one run, one table. Not N manual runs stitched
-  together.
-- **`--repeat 3`** — agent output is nondeterministic. A single
-  "pass" could be luck. Repeat is a built-in flag, not a DIY loop.
-- **`skill-used` assertion** — distinguishes "got the right answer
-  because the skill guided it" from "got the right answer by
-  coincidence." Without this signal, a developer might think their
-  skill change worked when the agent never even read it.
-
-### Layer 2: Making "correct" something you can declare
-
-The developer has a standard for what the agent should do — but
-that standard usually lives only in their head. Assertions force
-it into code:
+promptfoo handles single-turn evaluation well. For multi-turn
+context degradation (does the skill hold up after 15 turns of
+real work?), a rough proxy is possible by varying prompt length:
 
 ```yaml
-- type: javascript
-  value: 'output.runner === "uv"'
-- type: skill-used
-  value: airflow-contribution
+- vars: { filler: "{{file://fillers/40k.txt}}", probe: "..." }
 ```
 
-Once declared:
-- The standard is **executable and repeatable** — anyone modifying
-  guidance reruns the same assertions.
-- **JSON schema output** (`output_format`) — clean structured
-  results, no sed/grep to strip markdown fences.
-- **Weighted scoring** — "used the right tool" and "final answer
-  correct" score independently, one case gives two dimensions.
+True session-accumulation testing requires a custom Agent SDK
+harness — deferred to a later phase, contingent on the rough proxy
+showing signal.
 
-This is unit-test discipline for agent guidance. You wouldn't
-change code without running pytest; why change guidance without
-running eval?
+## Vendor independence
 
-### Layer 3: Regression protection for guidance iteration
+promptfoo is owned by OpenAI (acquired 2026-03). The harness avoids
+architectural dependency:
 
-Without eval, every AGENTS.md/skill change is blind — fixing A
-might silently break B. With a case suite:
+- Investment is in test cases (domain knowledge in YAML), not runner
+  infrastructure.
+- No CI integration — runs manually, on demand.
+- Cases are portable — a 50-line Python script can replicate the
+  eval loop. Migration cost: ~1 day.
+- MIT license permits forking.
 
-- **Regression baseline** — today's pass rate becomes the bar.
-  Every future change is asked "better or worse than status quo?"
-- **History tracking** — pass rates over time as guidance evolves,
-  via web UI.
+## Open questions
 
-The developer cost is minimal:
-- `npx` — no install, no binary downloads, no package.json changes.
-- Declarative YAML — cases are configuration, not code.
-- Local-first, open-source — a dev tool, not infrastructure.
-
-## Context degradation: what promptfoo can and cannot do
-
-### Can do: context-as-variable (rough proxy, v1.5)
-
-Treat context length as a test dimension. Pre-build filler texts
-of different sizes, prepend them to the probe:
-
-```yaml
-tests:
-  - vars: { filler: "",                            probe: "...", level: "0k" }
-  - vars: { filler: "{{file://fillers/15k.txt}}", probe: "...", level: "15k" }
-  - vars: { filler: "{{file://fillers/40k.txt}}", probe: "...", level: "40k" }
-```
-
-With `--repeat 5`, this produces "pass rate vs context length" —
-a rough degradation curve. Enough to answer "does my skill hold
-up in long context, and where does it start to break?"
-
-**Honest limitation:** this simulates degradation as "different
-lengths in a single prompt," not "same session accumulating over
-multiple turns." Real Claude Code sessions accumulate model-
-generated tokens, tool results, and conversation structure — a
-pre-built long prompt misses those dynamics. This curve is a
-proxy for degradation, not degradation itself.
-
-### Cannot do: real session accumulation (v2, self-built)
-
-True degradation testing requires:
-- N turns of real multi-step work (debug, edit, read logs) in one
-  session, context accumulates naturally.
-- Probe inserted at turn N, checking if the agent still follows
-  skill rules.
-- Vary N (turn 3/8/15), plot pass rate vs turn depth.
-
-promptfoo's multi-turn support is designed for pipeline correctness,
-not "inject a controlled probe at arbitrary session depth and
-measure decay." This requires a custom Agent SDK harness.
-
-### Roadmap
-
-| Phase | Tests | Tool |
-|-------|-------|------|
-| v1 (now) | with/without skill, single-turn | promptfoo |
-| v1.5 (after v1 stabilizes) | pass rate vs context length, rough proxy | promptfoo + context-as-vars |
-| v2 (if v1.5 shows signal) | pass rate vs session turn depth, reload effect | custom Agent SDK harness |
-
-v1.5 is cheap validation: if even the rough proxy shows no
-degradation, v2 may not be needed. If it does, the data justifies
-the investment. Either way, v1 must stabilize first — the probe
-itself needs to be reliable at 0k context before testing at 40k.
-
-## Architecture
-
-```
-dev/skill-evals/
-  eval.sh                  ← assembles temp working dirs, runs promptfoo
-  promptfooconfig.yaml     ← 6 provider arms + cases + assertions
-```
-
-`eval.sh` dynamically builds working directories at eval time:
-- SKILL.md copied from repo's single source
-- AGENTS.md read from repo (never a stale copy)
-- Proposed AGENTS.md generated via `sed` (never stored)
-- Temp dirs cleaned up on exit
-
-This preserves Agent SDK provider features (`skill-used`,
-`output_format`) while avoiding fixture drift.
-
-## No architectural dependency on promptfoo
-
-promptfoo is owned by OpenAI (acquired 2026-03). For an ASF
-project, building architectural dependency on a single commercial
-entity's tool is a concern — regardless of current license.
-
-This eval harness deliberately avoids that dependency:
-
-- **promptfoo is an execution convenience layer, not an
-  architectural choice.** The investment is in test cases (YAML
-  with domain knowledge about Airflow's command routing), not in
-  runner infrastructure.
-- **No CI integration.** Runs manually, on demand, as a dev-time
-  decision tool. Not in any build path, release gate, or workflow.
-- **Cases are portable.** A 50-line Python script can read the
-  same YAML and pipe to `claude -p` via `subprocess`. Migration
-  cost: ~1 day.
-- **MIT license.** If the project changes direction, the last
-  open version can be forked.
-
-## Impact assessment
-
-| Concern | Severity | Mitigation |
-|---------|:--------:|------------|
-| OpenAI ownership — ASF optics | Medium | No architectural dependency; execution-only; not in CI or build path |
-| Version not pinned | Low | `npx promptfoo@0.120.19` to lock |
-| Not in package.json / pyproject.toml | Low | Dev-only tool, documented in README |
-| LLM call cost | Low | Manual-only, on demand before changes |
-
-## Proposal
-
-Use promptfoo with the Claude Agent SDK provider as the eval
-runner for Airflow skill-evals:
-
-- Config: `dev/skill-evals/promptfooconfig.yaml`
-- Setup + run: `dev/skill-evals/eval.sh`
-- Run manually, not in CI — a dev-time decision tool
-
-### Use cases
-
-1. **Before modifying SKILL.md** — run eval to confirm current
-   pass rates, modify, re-run, compare
-2. **Before modifying AGENTS.md** — agents-current vs agents-proposed
-   arm detects regressions
-3. **Skill effectiveness measurement** — skill-only vs baseline
-   quantifies the skill's contribution
-
-### Immediate next step
-
-Expand from 3 to 10+ discriminating cases — provider tests with
-system dep failures, uv fallback scenarios, cross-package changes,
-breeze suite selection. The cases are the bottleneck, not the
-framework.
-
-## Open questions for discussion
-
-- Is the Node.js dependency acceptable for a dev-only eval tool?
 - Does the `anthropic:claude-agent-sdk` provider require API key
-  access for GSoC contributors, or is there a project key available?
+  access for GSoC contributors, or is there a project key?
+- Is a prek reminder hook for guidance changes worth adding now,
+  or after the case suite reaches a useful size?
