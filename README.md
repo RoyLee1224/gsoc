@@ -10,6 +10,7 @@
 | Project | [Apache Airflow](https://github.com/apache/airflow) |
 | Program | [Google Summer of Code 2026](https://summerofcode.withgoogle.com/) |
 | Project period | May 25–August 24, 2026 |
+| Community discussion | [Airflow development mailing-list thread](https://lists.apache.org/thread/vggoo6yhx2x7nj6w0khc0ynwt9xrbrqq) |
 
 ## Summary
 
@@ -34,6 +35,11 @@ The project therefore established three complementary guidance-quality layers:
 Four contributions implementing these layers were merged into Apache Airflow.
 The resulting infrastructure provides a foundation for introducing smaller,
 on-demand contribution skills without relying only on intuition.
+
+The initial results and proposed next steps were shared with the Airflow
+community in this [public development mailing-list
+thread](https://lists.apache.org/thread/vggoo6yhx2x7nj6w0khc0ynwt9xrbrqq).
+Community feedback will help prioritize the follow-up work described below.
 
 ## Scope evolution
 
