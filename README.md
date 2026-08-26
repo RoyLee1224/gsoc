@@ -11,6 +11,7 @@
 | Program | [Google Summer of Code 2026](https://summerofcode.withgoogle.com/) |
 | Project period | May 25–August 24, 2026 |
 | Community discussion | [Airflow development mailing-list thread](https://lists.apache.org/thread/vggoo6yhx2x7nj6w0khc0ynwt9xrbrqq) |
+| Upcoming presentation | 10-minute spotlight at the Airflow Town Hall, September 9, 2026 |
 
 ## Summary
 
