@@ -39,7 +39,11 @@ on-demand contribution skills without relying only on intuition.
 The initial results and proposed next steps were shared with the Airflow
 community in this [public development mailing-list
 thread](https://lists.apache.org/thread/vggoo6yhx2x7nj6w0khc0ynwt9xrbrqq).
-Community feedback will help prioritize the follow-up work described below.
+Following this discussion, I was invited to present the work in a 10-minute
+spotlight at the September 9, 2026 Airflow Town Hall. The presentation will
+cover the motivation, initial evaluation results, and future plans for Airflow
+agent guidance. Community feedback will help prioritize the follow-up work
+described below.
 
 ## Scope evolution
 
